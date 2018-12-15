@@ -3,19 +3,22 @@ package edu.wisc.cs.sdn.simpledns;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.DataInputStream;
+import java.io.File;
+import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.net.DatagramPacket;
 import java.net.DatagramSocket;
+import java.net.Inet4Address;
 import java.net.InetAddress;
 import java.net.SocketException;
 import java.net.UnknownHostException;
+import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashSet;
 import java.util.List;
-import java.util.concurrent.RecursiveAction;
+import java.util.Scanner;
 
-import com.sun.deploy.security.ValidationState.TYPE;
 import com.sun.org.apache.xerces.internal.impl.xpath.regex.RegularExpression;
 import com.sun.prism.impl.QueuedPixelSource;
 
@@ -25,7 +28,6 @@ import edu.wisc.cs.sdn.simpledns.packet.DNSRdata;
 import edu.wisc.cs.sdn.simpledns.packet.DNSRdataBytes;
 import edu.wisc.cs.sdn.simpledns.packet.DNSResourceRecord;
 import javafx.scene.chart.PieChart.Data;
-import sun.management.snmp.util.SnmpNamedListTableCache;
 
 public class SimpleDNS 
 {
@@ -35,6 +37,7 @@ public class SimpleDNS
 	static InetAddress originalIP;
 	static InetAddress rootIPAddr;
 	static DNS originalDNS;
+	static short originalType;
 
 	public static void main(String[] args) throws IOException
 	{	
@@ -79,6 +82,7 @@ public class SimpleDNS
 		//System.out.println("Original DNS request");
 		//System.out.println(dnsRequest);
 		originalDNS = dnsRequest;
+		originalType = dnsRequest.getQuestions().get(0).getType();
 		
 		//System.out.println("root ip: " + ip + ", ec2Path: " + ec2Path);
 		//System.out.println("opcode: " + dnsRequest.getOpcode());
@@ -97,10 +101,19 @@ public class SimpleDNS
 		System.out.println("--------------------------------------------------------");
 		
 		DatagramPacket finalResponse = null;
-			
-		resultPacket = resolveIfCNAMEExists(resultPacket, sendSocket);		
 		
 		if (resultPacket != null) {
+			
+			// Check for CNAME
+			if (originalType == DNS.TYPE_A || originalType == DNS.TYPE_AAAA) {
+				resultPacket = resolveIfCNAMEExists(resultPacket, sendSocket);		
+			}
+			
+			// Check for EC2 regions
+			if (originalType == DNS.TYPE_A) {
+				resultPacket = readEC2File(ec2Path, resultPacket);
+			}
+			
 			finalResponse = constructDatagramPacketToSend(resultPacket, originalPort, originalIP);
 		} else {
 			
@@ -180,10 +193,70 @@ public class SimpleDNS
 	}
 	
 	
-	public static void readEC2File(String path) {
+	public static DNS readEC2File(String path, DNS resultPacket) {
 		
+		System.out.println("Inside read EC2");
+		List<DNSResourceRecord> answers = new ArrayList<>(resultPacket.getAnswers());
+		List<DNSResourceRecord> txtAnswers = new ArrayList<>();
+		
+		try {
+			Scanner scanner = new Scanner(new File(path));
+			while (scanner.hasNextLine()) {
+				String [] currServer = scanner.nextLine().split(",");
+				String [] ipAndMask = currServer[0].split("/");
+				checkIfEC2(answers, txtAnswers, ipAndMask, currServer[1]);
+				System.out.println("currServer: " + Arrays.toString(currServer) + ", ipAndMask: " + Arrays.toString(ipAndMask));
+			}
+			
+		} catch (FileNotFoundException e) {
+			// TODO Auto-generated catch block
+			e.printStackTrace();
+		}
+		
+		System.out.println("Size of TXT answers is " + txtAnswers.size());
+		
+		for (DNSResourceRecord txtRecord : txtAnswers) {
+			resultPacket.addAnswer(txtRecord);
+		}
+		
+		System.out.println("Done with read EC2");
+		return resultPacket;
 	}
 	
+	public static boolean checkIfEC2(List<DNSResourceRecord> answers, List<DNSResourceRecord> txtAnswers, String [] ipAndMask, String location) {
+		
+		for (DNSResourceRecord ans : answers) {
+			if (ans.getType() == DNS.TYPE_A) {
+				try {
+					InetAddress amazon = InetAddress.getByName(ipAndMask[0]);
+					InetAddress ansIP = InetAddress.getByName(ans.getData().toString());
+					
+					long amazonIntIP = ByteBuffer.wrap(amazon.getAddress()).getInt();
+					long ansIntIP = ByteBuffer.wrap(ansIP.getAddress()).getInt();
+					int mask = Integer.parseInt(ipAndMask[1]);
+					
+					System.out.println("amazon: " + amazon.getHostAddress() + ", " + amazonIntIP + ", ansIP: " 
+											+ ansIP.getHostAddress() + ", " + ansIntIP + ", mask: " + mask);
+					 
+					if (amazonIntIP == (ansIntIP & mask)) {
+						String ec2ServerName = location + "-" + ans.getData().toString();
+						
+						DNSRdata data = new DNSRdataBytes(ec2ServerName.getBytes());
+						
+						txtAnswers.add(new DNSResourceRecord(ans.getName(), DNS.TYPE_TXT, data));
+						System.out.println("$$$$$$$$ Matched $$$$$$$$$$");
+					}
+					
+				} catch (UnknownHostException e) {
+					// TODO Auto-generated catch block
+					e.printStackTrace();
+				}
+			}
+		}
+		return true;
+	}
+	
+ 	
 	public static boolean isValidQuery(DNS dnsRequest) {
 		
 		if (dnsRequest.getOpcode() != DNS.OPCODE_STANDARD_QUERY) {
