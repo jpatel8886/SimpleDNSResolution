@@ -15,13 +15,17 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.concurrent.RecursiveAction;
 
+import com.sun.deploy.security.ValidationState.TYPE;
 import com.sun.org.apache.xerces.internal.impl.xpath.regex.RegularExpression;
+import com.sun.prism.impl.QueuedPixelSource;
 
 import edu.wisc.cs.sdn.simpledns.packet.DNS;
 import edu.wisc.cs.sdn.simpledns.packet.DNSQuestion;
 import edu.wisc.cs.sdn.simpledns.packet.DNSRdata;
 import edu.wisc.cs.sdn.simpledns.packet.DNSRdataBytes;
 import edu.wisc.cs.sdn.simpledns.packet.DNSResourceRecord;
+import javafx.scene.chart.PieChart.Data;
+import sun.management.snmp.util.SnmpNamedListTableCache;
 
 public class SimpleDNS 
 {
@@ -93,6 +97,9 @@ public class SimpleDNS
 		System.out.println("--------------------------------------------------------");
 		
 		DatagramPacket finalResponse = null;
+			
+		resultPacket = resolveIfCNAMEExists(resultPacket, sendSocket);		
+		
 		if (resultPacket != null) {
 			finalResponse = constructDatagramPacketToSend(resultPacket, originalPort, originalIP);
 		} else {
@@ -111,6 +118,67 @@ public class SimpleDNS
 		listenSocket.send(finalResponse);
 		
 	}
+	
+	
+	public static DNS resolveIfCNAMEExists(DNS resultPacket, DatagramSocket sendSocket) throws IOException {
+		System.out.println("########################## Inside resolveIfCNAMEExists ###################################");
+		
+		if (isARecordPresent(resultPacket)) {
+			return resultPacket;
+		}
+		
+		List<DNSResourceRecord> answers = new ArrayList<>(resultPacket.getAnswers());
+				
+		for (DNSResourceRecord ans : answers) {
+			
+			System.out.println("CNAME record exists. Need to resolve it " + ans.toString());
+			
+			if (ans.getType() == DNS.TYPE_CNAME) {
+				
+				DNSQuestion oQues = originalDNS.getQuestions().get(0);
+				originalDNS.removeQuestion(oQues);
+				
+				DNSQuestion newQues = new DNSQuestion(ans.getData().toString(), DNS.TYPE_A);
+				originalDNS.addQuestion(newQues);
+				
+				HashSet<String> visitedNameServers = new HashSet<>();
+				boolean recursionDesired = true;
+				
+				DNS result = process(sendSocket, originalDNS, rootIPAddr, visitedNameServers, recursionDesired, 0);
+				
+				System.out.println("Result inside CNAME resolution is");
+				System.out.println(result.toString());
+				
+				
+				if (result != null) {
+					result = resolveIfCNAMEExists(result, sendSocket);
+				}
+				
+				List<DNSResourceRecord> newAnswers = result.getAnswers();
+				for (DNSResourceRecord newAns : newAnswers) {
+					resultPacket.addAnswer(newAns);
+				}
+				
+				// Fix the DNS request
+				originalDNS.removeQuestion(newQues);
+				originalDNS.addQuestion(oQues);
+				
+			}
+		}
+		System.out.println("#########################################################################");
+		return resultPacket;
+	}
+	
+	public static boolean isARecordPresent(DNS resultPacket) {
+		List<DNSResourceRecord> answers = resultPacket.getAnswers();
+		for (DNSResourceRecord ans : answers) {
+			if (ans.getType() == DNS.TYPE_A) {
+				return true;
+			}
+		}
+		return false;
+	}
+	
 	
 	public static void readEC2File(String path) {
 		
@@ -199,9 +267,9 @@ public class SimpleDNS
 				if (matchedARecord != null && !visitedNameServers.contains(matchedARecord.getName())) {
 	
 					// Ignore this to test the skipped servers
-					if (matchedARecord.getName().equals("ns-1497.awsdns-59.org")) {
-						continue;
-					}
+//					if (matchedARecord.getName().equals("ns-1497.awsdns-59.org")) {
+//						continue;
+//					}
 					
 					System.out.println("Sending request to name server: " +  matchedARecord.getName());
 					System.out.println("matchedARecord");
