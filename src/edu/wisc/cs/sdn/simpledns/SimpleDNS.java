@@ -29,7 +29,8 @@ public class SimpleDNS
 	final static int PORT_TO_SEND_DNS = 53;
 	static int originalPort;
 	static InetAddress originalIP;
-	
+	static InetAddress rootIPAddr;
+	static DNS originalDNS;
 
 	public static void main(String[] args) throws IOException
 	{	
@@ -58,7 +59,7 @@ public class SimpleDNS
 			System.exit(1);
 		}
 
-		InetAddress rootIPAddr = getIPAddrObject(ip);
+		rootIPAddr = getIPAddrObject(ip);
 		if (rootIPAddr == null) {
 			System.err.println("Cannot resolve root ip address");
 			System.exit(1);
@@ -71,8 +72,12 @@ public class SimpleDNS
 		DatagramSocket listenSocket = new DatagramSocket(LOCAL_DNS_PORT);
 		DNS dnsRequest = listenForDig(listenSocket);
 		
-		System.out.println("root ip: " + ip + ", ec2Path: " + ec2Path);
-		System.out.println("opcode: " + dnsRequest.getOpcode());
+		//System.out.println("Original DNS request");
+		//System.out.println(dnsRequest);
+		originalDNS = dnsRequest;
+		
+		//System.out.println("root ip: " + ip + ", ec2Path: " + ec2Path);
+		//System.out.println("opcode: " + dnsRequest.getOpcode());
 		HashSet<String> visitedNameServers = new HashSet<>();
 		boolean recursionDesired = dnsRequest.isRecursionDesired(); 
 		
@@ -88,7 +93,6 @@ public class SimpleDNS
 		System.out.println("--------------------------------------------------------");
 		
 		DatagramPacket finalResponse = null;
-		InetAddress localHostAddr = getIPAddrObject("127.0.0.1");
 		if (resultPacket != null) {
 			finalResponse = constructDatagramPacketToSend(resultPacket, originalPort, originalIP);
 		} else {
@@ -142,37 +146,46 @@ public class SimpleDNS
 		return (new DatagramPacket(buf, buf.length, addr, PORT_TO_SEND_DNS));
 	}
 	
-	public static DNS process(DatagramSocket sendSocket,  DNS request, InetAddress addrToSend, HashSet<String> visitedNameServers, boolean recurrsionDesired, int level) throws IOException {
-		System.out.println("------------------------- Level " + level +  " -------------------------");
-//		System.out.println("DNS request");
-//		System.out.println(request);
-		
+	public static DNS process(DatagramSocket sendSocket,  DNS request, InetAddress addrToSend, HashSet<String> visitedNameServers, boolean recursionDesired, int level) throws IOException {
+		System.out.println("------------------------- Level " + level +  " DNS Request-------------------------");
+		System.out.println(request);
+		System.out.println("---------------------------------------------------------------------------------");
+//		
 		if (!isValidQuery(request)) {
 			//System.out.println("Not a valid DNS request");
 			return null;
 		}
 		
 		// Always send the original request but change the addrs to
-		DatagramPacket packetToSend = constructDatagramPacketToSend(request, PORT_TO_SEND_DNS, addrToSend);
-		sendSocket.send(packetToSend);
-
+		System.out.println("Sending request to " + addrToSend.getHostName() + ", " + addrToSend.getHostAddress());
 		// Receiving the response for the request just sent
 		byte[] recBuf = new byte[1500];
 		DatagramPacket packet = new DatagramPacket(recBuf, recBuf.length);
+		DatagramPacket packetToSend = constructDatagramPacketToSend(request, PORT_TO_SEND_DNS, addrToSend);
+		
+		sendSocket.send(packetToSend);
 		sendSocket.receive(packet);
 		
 		DNS result = DNS.deserialize(packet.getData(), packet.getData().length);
 		
+		System.out.println("Successfuly deserialized");
+		
 		if (result.getAnswers().size() > 0) {
-			//System.out.println("Something found in answer section");
+			////System.out.println("Something found in answer section");
 			return result; 
 		}		
 		
+		System.out.println("Result");
+		System.out.println(result);
+		System.out.println("Answers not found");
+		
 		// Send the result from the root NS back if recursion is not desired
-		if (!recurrsionDesired) {
+		if (!recursionDesired) {
 			System.out.println("Stopping here. Recursion is not desired");
 			return result;
 		}
+		
+		//System.out.println("recursion is desired");
 		
 		List<DNSResourceRecord> authority = result.getAuthorities();
 		List<DNSResourceRecord> additional = result.getAdditional();
@@ -181,14 +194,18 @@ public class SimpleDNS
 		// Go over all the NS records in the 
 		for (DNSResourceRecord record : authority) {
 			if (record.getType() == DNS.TYPE_NS) {
-				DNSResourceRecord matchedARecord = ifExistsInAuthority(record, additional, skipped);
-								
+				DNSResourceRecord matchedARecord = ifExistsInAdditional(record, additional, skipped);
+							
 				if (matchedARecord != null && !visitedNameServers.contains(matchedARecord.getName())) {
 	
 					// Ignore this to test the skipped servers
-//					if (matchedARecord.getName().equals("ns-1497.awsdns-59.org")) {
-//						continue;
-//					}
+					if (matchedARecord.getName().equals("ns-1497.awsdns-59.org")) {
+						continue;
+					}
+					
+					System.out.println("Sending request to name server: " +  matchedARecord.getName());
+					System.out.println("matchedARecord");
+					System.out.println(matchedARecord);
 					
 					// Add the current NS to vistedNameServers
 					visitedNameServers.add(matchedARecord.getName());
@@ -198,7 +215,7 @@ public class SimpleDNS
 					System.out.println("ip: " + ip);
 					InetAddress addr = getIPAddrObject(ip);
 					
-					DNS newRequest = process(sendSocket, request, addr, visitedNameServers, recurrsionDesired, level + 1);
+					DNS newRequest = process(sendSocket, request, addr, visitedNameServers, recursionDesired, level + 1);
 					if (newRequest != null) {
 						return newRequest;
 					}
@@ -206,24 +223,117 @@ public class SimpleDNS
 			}
 		}
 		
+		
+		System.out.println("Done with all authority section records at level: " + level);
+				
+		System.out.println("Trying to find A records for skipped NS");
+		
+		System.out.println(skipped.toString());
+		
 		// If some records were skipped
 		for (DNSResourceRecord record : skipped) {
 			// First request the A record for this NS 
-			System.out.println("Checking skipped records now");
-			System.out.println(record.getName());
+			//System.out.println("Checking skipped records now");
+			
+			
+			
+			//System.out.println(record.getData().toString());
+			
+			InetAddress resolveIPAddr = resolveARecordForNS(record, rootIPAddr, sendSocket);
+			
+			if (resolveIPAddr != null) {
+				System.out.println("Resolved IP address: " + resolveIPAddr.getHostAddress() + ", " + resolveIPAddr.getHostName());
+				DNS newRequest = process(sendSocket, request, resolveIPAddr, visitedNameServers, recursionDesired, level + 1);
+				
+				if (newRequest != null) {
+					return newRequest;
+				}
+			}
+			
 			// the recursively call this function
 		}
+		
+		System.out.println("Done resolving name servers at this level. Going a level below.");
 		
 		return null;
 	}
 	
-	public static DNSResourceRecord ifExistsInAuthority(DNSResourceRecord target, List<DNSResourceRecord> additional, List<DNSResourceRecord> skipped) {
+	
+	public static InetAddress resolveARecordForNS(DNSResourceRecord nsToResolve, InetAddress addr, DatagramSocket sendSocket) throws IOException {
+		System.out.println("------------ Inside resolveARecordForNS ----------------------");
+		
+		InetAddress resolveIPAddress = null;
+		
+		HashSet<String> visitedNameServers = new HashSet<>();
+		boolean recursionDesired = true;
+		
+		// Construct DNS Request
+//		DNS dnsRequest = new DNS();
+//		dnsRequest.setOpcode(DNS.OPCODE_STANDARD_QUERY);
+//		dnsRequest.setRcode(DNS.RCODE_NO_ERROR);
+//		dnsRequest.setAuthoritative(true);
+//		dnsRequest.setRecursionDesired(recursionDesired);
+//		dnsRequest.setRecursionAvailable(false);
+		
+		String nameToResolve = nsToResolve.getData().toString();
+		
+		System.out.println("nameToResolve: " +  nameToResolve);
+		 
+		
+		DNSQuestion ques = new DNSQuestion(nameToResolve, DNS.TYPE_A);
+		//dnsRequest.addQuestion(ques);
+		
+		
+		System.out.println("start IP adddress " + addr.getHostAddress() + ", " + addr.getHostName());
+		
+		// Temporary 
+			DNSQuestion oQues = originalDNS.getQuestions().get(0);
+			System.out.println("Original question: " + oQues);
+			originalDNS.removeQuestion(oQues);
+			System.out.println("After removing original question size of questions in original dns request: " + originalDNS.getQuestions().size());
+			originalDNS.addQuestion(ques);
+				
+			//dnsRequest = originalDNS;	
+		//
+		
+		System.out.println("New original DNS is");
+		System.out.println(originalDNS);
+		
+		visitedNameServers.add(nameToResolve);
+		
+		System.out.println("Calling process now from resolveARecordForNS");
+		DNS result = process(sendSocket, originalDNS, addr, visitedNameServers, recursionDesired, 0);
+		System.out.println("process returned back to resolveARecordForNS");
+		
+		if (result != null) {
+			List<DNSResourceRecord> answers = result.getAnswers();
+						
+			String ip = null;
+			for (DNSResourceRecord ans : answers) {
+				if (ans.getType() == DNS.TYPE_A) {
+					ip = ans.getData().toString();
+				}
+			}
+			
+			if (ip != null) {
+				resolveIPAddress = getIPAddrObject(ip);
+			}
+		}
+		
+		originalDNS.removeQuestion(ques);
+		originalDNS.addQuestion(oQues);
+		
+		System.out.println("------------ Done with resolveARecordForNS ----------------------");
+		return resolveIPAddress;
+	}
+	
+	public static DNSResourceRecord ifExistsInAdditional(DNSResourceRecord target, List<DNSResourceRecord> additional, List<DNSResourceRecord> skipped) {
 		DNSRdata temp = target.getData();
 		
 		String targetStr = temp.toString();
 		
 		for (DNSResourceRecord record : additional) {
-			System.out.println("targetStr: " + targetStr + ", addition: " + record.getName());
+			//System.out.println("targetStr: " + targetStr + ", addition: " + record.getName());
 			
 			// Checking if in the addition section either A or AAAA type of records exists
 			if (targetStr.equals(record.getName()) && record.getType() == DNS.TYPE_A) {
@@ -265,9 +375,9 @@ public class SimpleDNS
 			
 			DNS dns = DNS.deserialize(packet.getData(), packet.getData().length);
 			
-			System.out.println("------------------ Original request -------------------");
-			System.out.println(dns.toString());
-			System.out.println("-------------------------------------------------------");
+			//System.out.println("------------------ Original request -------------------");
+			//System.out.println(dns.toString());
+			//System.out.println("-------------------------------------------------------");
 			
 			return dns;
 		} catch (IOException e) {
@@ -283,7 +393,7 @@ public class SimpleDNS
 		byte [] addr = new byte[4];
 		String [] subIP = ip.split("\\.");
 
-		System.out.println("subIP: " + Arrays.toString(subIP) + ", length: " + subIP.length);
+		////System.out.println("subIP: " + Arrays.toString(subIP) + ", length: " + subIP.length);
 
 		for (int i = 0; i < 4; i++) {
 			addr[i] = (byte)(Integer.parseInt(subIP[i]));
