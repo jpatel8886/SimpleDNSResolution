@@ -23,6 +23,7 @@ import edu.wisc.cs.sdn.simpledns.packet.DNS;
 import edu.wisc.cs.sdn.simpledns.packet.DNSQuestion;
 import edu.wisc.cs.sdn.simpledns.packet.DNSRdata;
 import edu.wisc.cs.sdn.simpledns.packet.DNSRdataBytes;
+import edu.wisc.cs.sdn.simpledns.packet.DNSRdataString;
 import edu.wisc.cs.sdn.simpledns.packet.DNSResourceRecord;
 
 public class SimpleDNS 
@@ -249,35 +250,18 @@ public class SimpleDNS
 					int amazonIntIP = ByteBuffer.wrap(amazon.getAddress()).getInt();
 					int ansIntIP = ByteBuffer.wrap(ansIP.getAddress()).getInt();
 					int mask = Integer.parseInt(ipAndMask[1]);
-//					int maskedIP = (ansIntIP & mask);
-//					
-//					System.out.println("amazon: " + amazon.getHostAddress() + ", " + amazonIntIP + ", ansIP: " 
-//											+ ansIP.getHostAddress() + ", " + ansIntIP + ", mask: " + mask
-//											+ ", maskedIP: " + maskedIP);
-					
 					int ansbitShifted = (ansIntIP >> mask);
 					int amazonbitshifted = (amazonIntIP >> mask);
 					
 					System.out.println("ansbitShifted: " + ansbitShifted + ", amazonbitshifted: " + amazonbitshifted);
 					
 					if (ansbitShifted == amazonbitshifted) {
-						String ec2ServerName = location + "-" + ansIP.getHostAddress();
-						System.out.println("Matched address is " + ec2ServerName);
-						DNSRdata data = new DNSRdataBytes(ec2ServerName.getBytes());
-						
+						DNSRdataString s = new DNSRdataString(location + "-" + ansIP.getHostAddress());
+						DNSRdata data = (DNSRdata)s;
 						DNSResourceRecord newTxtAnswer = new DNSResourceRecord(ans.getName(), DNS.TYPE_TXT, data);
 						newTxtAnswer.setTtl(ans.getTtl());
 						txtAnswers.add(newTxtAnswer);
 					}
-					
-//					if (amazonIntIP == maskedIP) {
-//						String ec2ServerName = location + "-" + ans.getData().toString();
-//						
-//						DNSRdata data = new DNSRdataBytes(ec2ServerName.getBytes());
-//						
-//						txtAnswers.add(new DNSResourceRecord(ans.getName(), DNS.TYPE_TXT, data));
-//						System.out.println("$$$$$$$$ Matched $$$$$$$$$$");
-//					}
 					
 				} catch (UnknownHostException e) {
 					// TODO Auto-generated catch block
@@ -386,6 +370,7 @@ public class SimpleDNS
 					// Find the ip of the name server and send the query to that name server
 					String ip = matchedARecord.getData().toString();
 					System.out.println("ip: " + ip);
+					
 					InetAddress addr = getIPAddrObject(ip);
 					
 					DNS newRequest = process(sendSocket, request, addr, visitedNameServers, recursionDesired, level + 1);
@@ -508,15 +493,16 @@ public class SimpleDNS
 		for (DNSResourceRecord record : additional) {
 			//System.out.println("targetStr: " + targetStr + ", addition: " + record.getName());
 			
-			// Checking if in the addition section either A or AAAA type of records exists
-			if (targetStr.equals(record.getName()) && record.getType() == DNS.TYPE_A) {
+			// For everything except IPv6
+			if (targetStr.equals(record.getName()) && record.getType() == DNS.TYPE_A && originalType != DNS.TYPE_AAAA) {
 				return record;
 			}
 			
-			// Fix this
-//			if (targetStr.equals(record.getName()) && record.getType() == DNS.TYPE_AAAA) {
-//				return record;
-//			}
+			// For IPv6 Addresses
+			if (targetStr.equals(record.getName()) && record.getType() == DNS.TYPE_AAAA && originalType == DNS.TYPE_AAAA) {
+				System.out.println("Inside returning IPv6 address");
+				return record;
+			}
 		}
 		skipped.add(target);
 		return null;
@@ -561,23 +547,26 @@ public class SimpleDNS
 	}
 
 
-	public static InetAddress getIPAddrObject(String ip) {
-		InetAddress rootIPAddr = null;
-		byte [] addr = new byte[4];
-		String [] subIP = ip.split("\\.");
+	public static InetAddress getIPAddrObject(String ip) throws UnknownHostException {
+		InetAddress ipAddr = InetAddress.getByName(ip);
+		
+		
+		
+//		byte [] addr = new byte[4];
+//		String [] subIP = ip.split("\\.");
+//
+//		////System.out.println("subIP: " + Arrays.toString(subIP) + ", length: " + subIP.length);
+//
+//		for (int i = 0; i < 4; i++) {
+//			addr[i] = (byte)(Integer.parseInt(subIP[i]));
+//		}
+//
+//		try {
+//			ipAddr = InetAddress.getByAddress(addr);
+//		} catch (UnknownHostException e1) {
+//			e1.printStackTrace();
+//		}
 
-		////System.out.println("subIP: " + Arrays.toString(subIP) + ", length: " + subIP.length);
-
-		for (int i = 0; i < 4; i++) {
-			addr[i] = (byte)(Integer.parseInt(subIP[i]));
-		}
-
-		try {
-			rootIPAddr = InetAddress.getByAddress(addr);
-		} catch (UnknownHostException e1) {
-			e1.printStackTrace();
-		}
-
-		return rootIPAddr;
+		return ipAddr;
 	}
 }
