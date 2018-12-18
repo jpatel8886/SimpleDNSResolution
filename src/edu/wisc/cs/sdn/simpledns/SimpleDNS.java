@@ -90,7 +90,8 @@ public class SimpleDNS
 		try {
 			resultPacket = process(sendSocket, dnsRequest, rootIPAddr, visitedNameServers, recursionDesired, 0);
 		} catch (IOException e) {
-			System.err.println("Unable to send the request out to port");
+			System.err.println("Error: Unable to send the request out to port");
+			e.printStackTrace();
 		}
 		
 		System.out.println("-------------------- Result packet before resolving CNAME ---------------------");
@@ -135,6 +136,125 @@ public class SimpleDNS
 		System.out.println("Sending the final packet back to IP: " + originalIP.getHostAddress() + ", port: " + originalPort);
 		listenSocket.send(finalResponse);
 		
+	}
+	
+	public static DatagramPacket constructDatagramPacketToSend(DNS request, int port, InetAddress addr) {
+		byte [] buf = request.serialize();
+		return (new DatagramPacket(buf, buf.length, addr, PORT_TO_SEND_DNS));
+	}
+	
+	public static DNS process(DatagramSocket sendSocket,  DNS request, InetAddress addrToSend, HashSet<String> visitedNameServers, boolean recursionDesired, int level) throws IOException {
+		System.out.println("------------------------- Level " + level +  " DNS Request-------------------------");
+		System.out.println(request);
+		System.out.println("---------------------------------------------------------------------------------");
+//		
+		if (!isValidQuery(request)) {
+			//System.out.println("Not a valid DNS request");
+			return null;
+		}
+		
+		// Always send the original request but change the addrs to
+		System.out.println("Sending request to " + addrToSend.getHostName() + ", " + addrToSend.getHostAddress());
+		// Receiving the response for the request just sent
+		byte[] recBuf = new byte[1500];
+		DatagramPacket packet = new DatagramPacket(recBuf, recBuf.length);
+		DatagramPacket packetToSend = constructDatagramPacketToSend(request, PORT_TO_SEND_DNS, addrToSend);
+		
+		
+		sendSocket.send(packetToSend);
+		sendSocket.receive(packet);
+		
+		DNS result = DNS.deserialize(packet.getData(), packet.getData().length);
+		
+		System.out.println("Successfuly deserialized");
+		
+		if (result.getAnswers().size() > 0) {
+			////System.out.println("Something found in answer section");
+			return result; 
+		}		
+		
+		System.out.println("Result");
+		System.out.println(result);
+		System.out.println("Answers not found");
+		
+		// Send the result from the root NS back if recursion is not desired
+		if (!recursionDesired) {
+			System.out.println("Stopping here. Recursion is not desired");
+			return result;
+		}
+		
+		//System.out.println("recursion is desired");
+		
+		List<DNSResourceRecord> authority = result.getAuthorities();
+		List<DNSResourceRecord> additional = result.getAdditional();
+		List<DNSResourceRecord> skipped = new ArrayList<>();
+		
+		// Go over all the NS records in the 
+		for (DNSResourceRecord record : authority) {
+			if (record.getType() == DNS.TYPE_NS) {
+				DNSResourceRecord matchedARecord = ifExistsInAdditional(record, additional, skipped);
+							
+				if (matchedARecord != null && !visitedNameServers.contains(matchedARecord.getName())) {
+	
+					// Ignore this to test the skipped servers
+//					if (matchedARecord.getName().equals("ns-1497.awsdns-59.org")) {
+//						continue;
+//					}
+					
+					System.out.println("Sending request to name server: " +  matchedARecord.getName());
+					System.out.println("matchedARecord");
+					System.out.println(matchedARecord);
+					
+					// Add the current NS to vistedNameServers
+					visitedNameServers.add(matchedARecord.getName());
+					
+					// Find the ip of the name server and send the query to that name server
+					String ip = matchedARecord.getData().toString();
+					System.out.println("ip: " + ip);
+					
+					InetAddress addr = getIPAddrObject(ip);
+					
+					DNS newRequest = process(sendSocket, request, addr, visitedNameServers, recursionDesired, level + 1);
+					if (newRequest != null) {
+						return newRequest;
+					}
+				}
+			}
+		}
+		
+		
+		System.out.println("Done with all authority section records at level: " + level);
+				
+		System.out.println("Trying to find A records for skipped NS");
+		
+		System.out.println(skipped.toString());
+		
+		// If some records were skipped
+		for (DNSResourceRecord record : skipped) {
+			// First request the A record for this NS 
+			//System.out.println("Checking skipped records now");
+			
+			
+			
+			//System.out.println(record.getData().toString());
+			
+			InetAddress resolveIPAddr = resolveARecordForNS(record, rootIPAddr, sendSocket);
+			
+			if (resolveIPAddr != null) {
+				System.out.println("Resolved IP address: " + resolveIPAddr.getHostAddress() + ", " + resolveIPAddr.getHostName());
+				DNS newRequest = process(sendSocket, request, resolveIPAddr, visitedNameServers, recursionDesired, level + 1);
+				
+				if (newRequest != null) {
+					return newRequest;
+				}
+			}
+			
+			// the recursively call this function
+		}
+		
+		System.out.println("Done resolving name servers at this level. Going a level below.");
+		
+		return null;
 	}
 	
 	
@@ -298,123 +418,7 @@ public class SimpleDNS
 		return true;
 	}
 	
-	public static DatagramPacket constructDatagramPacketToSend(DNS request, int port, InetAddress addr) {
-		byte [] buf = request.serialize();
-		return (new DatagramPacket(buf, buf.length, addr, PORT_TO_SEND_DNS));
-	}
 	
-	public static DNS process(DatagramSocket sendSocket,  DNS request, InetAddress addrToSend, HashSet<String> visitedNameServers, boolean recursionDesired, int level) throws IOException {
-		System.out.println("------------------------- Level " + level +  " DNS Request-------------------------");
-		System.out.println(request);
-		System.out.println("---------------------------------------------------------------------------------");
-//		
-		if (!isValidQuery(request)) {
-			//System.out.println("Not a valid DNS request");
-			return null;
-		}
-		
-		// Always send the original request but change the addrs to
-		System.out.println("Sending request to " + addrToSend.getHostName() + ", " + addrToSend.getHostAddress());
-		// Receiving the response for the request just sent
-		byte[] recBuf = new byte[1500];
-		DatagramPacket packet = new DatagramPacket(recBuf, recBuf.length);
-		DatagramPacket packetToSend = constructDatagramPacketToSend(request, PORT_TO_SEND_DNS, addrToSend);
-		
-		sendSocket.send(packetToSend);
-		sendSocket.receive(packet);
-		
-		DNS result = DNS.deserialize(packet.getData(), packet.getData().length);
-		
-		System.out.println("Successfuly deserialized");
-		
-		if (result.getAnswers().size() > 0) {
-			////System.out.println("Something found in answer section");
-			return result; 
-		}		
-		
-		System.out.println("Result");
-		System.out.println(result);
-		System.out.println("Answers not found");
-		
-		// Send the result from the root NS back if recursion is not desired
-		if (!recursionDesired) {
-			System.out.println("Stopping here. Recursion is not desired");
-			return result;
-		}
-		
-		//System.out.println("recursion is desired");
-		
-		List<DNSResourceRecord> authority = result.getAuthorities();
-		List<DNSResourceRecord> additional = result.getAdditional();
-		List<DNSResourceRecord> skipped = new ArrayList<>();
-		
-		// Go over all the NS records in the 
-		for (DNSResourceRecord record : authority) {
-			if (record.getType() == DNS.TYPE_NS) {
-				DNSResourceRecord matchedARecord = ifExistsInAdditional(record, additional, skipped);
-							
-				if (matchedARecord != null && !visitedNameServers.contains(matchedARecord.getName())) {
-	
-					// Ignore this to test the skipped servers
-//					if (matchedARecord.getName().equals("ns-1497.awsdns-59.org")) {
-//						continue;
-//					}
-					
-					System.out.println("Sending request to name server: " +  matchedARecord.getName());
-					System.out.println("matchedARecord");
-					System.out.println(matchedARecord);
-					
-					// Add the current NS to vistedNameServers
-					visitedNameServers.add(matchedARecord.getName());
-					
-					// Find the ip of the name server and send the query to that name server
-					String ip = matchedARecord.getData().toString();
-					System.out.println("ip: " + ip);
-					
-					InetAddress addr = getIPAddrObject(ip);
-					
-					DNS newRequest = process(sendSocket, request, addr, visitedNameServers, recursionDesired, level + 1);
-					if (newRequest != null) {
-						return newRequest;
-					}
-				}
-			}
-		}
-		
-		
-		System.out.println("Done with all authority section records at level: " + level);
-				
-		System.out.println("Trying to find A records for skipped NS");
-		
-		System.out.println(skipped.toString());
-		
-		// If some records were skipped
-		for (DNSResourceRecord record : skipped) {
-			// First request the A record for this NS 
-			//System.out.println("Checking skipped records now");
-			
-			
-			
-			//System.out.println(record.getData().toString());
-			
-			InetAddress resolveIPAddr = resolveARecordForNS(record, rootIPAddr, sendSocket);
-			
-			if (resolveIPAddr != null) {
-				System.out.println("Resolved IP address: " + resolveIPAddr.getHostAddress() + ", " + resolveIPAddr.getHostName());
-				DNS newRequest = process(sendSocket, request, resolveIPAddr, visitedNameServers, recursionDesired, level + 1);
-				
-				if (newRequest != null) {
-					return newRequest;
-				}
-			}
-			
-			// the recursively call this function
-		}
-		
-		System.out.println("Done resolving name servers at this level. Going a level below.");
-		
-		return null;
-	}
 	
 	
 	public static InetAddress resolveARecordForNS(DNSResourceRecord nsToResolve, InetAddress addr, DatagramSocket sendSocket) throws IOException {
@@ -494,15 +498,15 @@ public class SimpleDNS
 			//System.out.println("targetStr: " + targetStr + ", addition: " + record.getName());
 			
 			// For everything except IPv6
-			if (targetStr.equals(record.getName()) && record.getType() == DNS.TYPE_A && originalType != DNS.TYPE_AAAA) {
+			if (targetStr.equals(record.getName()) && record.getType() == DNS.TYPE_A) {
 				return record;
 			}
 			
 			// For IPv6 Addresses
-			if (targetStr.equals(record.getName()) && record.getType() == DNS.TYPE_AAAA && originalType == DNS.TYPE_AAAA) {
-				System.out.println("Inside returning IPv6 address");
-				return record;
-			}
+//			if (targetStr.equals(record.getName()) && record.getType() == DNS.TYPE_AAAA && originalType == DNS.TYPE_AAAA) {
+//				System.out.println("Inside returning IPv6 address");
+//				return record;
+//			}
 		}
 		skipped.add(target);
 		return null;
